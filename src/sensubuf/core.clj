@@ -3,10 +3,14 @@
   (:require [clojure.tools.cli :as cli]
             [clojure.java.io :as io]
             [cheshire.core :as json])
-  (:import (java.net Socket)
-           (java.io RandomAccessFile)
+  (:import (java.util Date)
            (java.net DatagramSocket DatagramPacket InetAddress)
+           (java.io RandomAccessFile)
+           (java.text SimpleDateFormat)
+           (java.net Socket)
            (org.apache.commons.io.input CountingInputStream)))
+
+(def log (agent nil))
 
 (def options
   [["-p" "--port" "sensu-client port"
@@ -19,14 +23,7 @@
    ["-t" "--tmpl" "JSON template containing --stubtok"]
    ["-v" "--verbose" "Print activity" :flag true :default false]
    ["-s" "--stubtok" "String to substitute with file data"
-           :default "%%BATCH%%"]])
-
-(defn write-socket [host port s]
-  (let [sock (Socket. host port)
-        os (.getOutputStream sock)]
-    (.write os (.getBytes s "utf-8"))
-    (.flush os)
-    (.close sock)))
+    :default "%%BATCH%%"]])
 
 (defn slurp-offset [f]
   (try
@@ -58,6 +55,17 @@
 (defn assemble [tmpl stubtok subtxt]
   (.replace tmpl stubtok (.replaceAll subtxt "\\\"" "\\\\\\\"")))
 
+(defn write [wtr & msg]
+  (let [d (.format (SimpleDateFormat. "yyyy-MM-dd HH:mm:ss") (Date.))
+        m (apply str d " " (interpose " " msg))]
+    (send log (fn [_] (.println wtr m)))))
+
+(defn errf [& msg]
+  (apply write System/err msg))
+
+(defn infof [& msg]
+  (apply write System/out msg))
+
 (defn -main [& args]
   (let [[{:keys [host port file offset-file
                  batch verbose tmpl stubtok] :as opts} args help]
@@ -72,9 +80,11 @@
             (let [payload (assemble tmpl stubtok
                                     (apply str (interpose "\n" b)))]
               (swap! c #(+ % (count b)))
-              (prn (-> payload json/decode (get "output") json/decode))
+              (when verbose
+                (errf (-> payload json/decode (get "output") json/decode)))
               (spit-udp sock host port payload))))
         (when verbose
-          (println @c "lines in" file "since byte" offset)
-          (println "now at offset" (.getByteCount is)))
-        (spit-offset raf (.getByteCount is))))))
+          (errf @c "lines in" file "since byte" offset)
+          (errf "now at offset" (.getByteCount is)))
+        (spit-offset raf (.getByteCount is))))
+    (shutdown-agents)))
